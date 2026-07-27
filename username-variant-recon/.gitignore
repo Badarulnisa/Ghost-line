@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+wmn-data.json
+report.json
+report.md
+report.csv
+*.log
+.DS_Store
