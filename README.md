@@ -22,8 +22,8 @@ Generates realistic username variants from seed identity data, then checks all o
 Standard username checkers — including WMN's own original script — only check the **exact string** you feed them. Real people rarely use one consistent handle everywhere. They drop digits, swap name order, add their city, or go by a mononym on some platforms.
 
 ```
- You know:     chaudhary78ahmeood07  (confirmed on one site)
- You're missing: ahmedchaudhary · chaudhary.ahmed · ahmedpaki · ahmed99 · ...
+ You know:     chaudhary7807  (confirmed on one site)
+ You're missing: ahmed · chaudhary.ahmed · ahmedpaki · ahmed99 · ...
 ```
 
 This tool closes that gap — generate the realistic variants, check all of them, get one report.
@@ -81,7 +81,7 @@ Roughly a **10x** wall-clock improvement per variant by checking sites concurren
 ```mermaid
 graph TD
     Seed(["Seed: ahmed + chaudhary<br/>location=lahore, year=1999"]) --> Order["Name-order permutations<br/>ahmed.chaudhary / chaudhary.ahmed"]
-    Seed --> Mono["Mononym forms<br/>ahmed / chaudhary"]
+    Seed --> Mono["Mononym forms<br/>ahmed / masood"]
     Seed --> Loc["+ location<br/>ahmedlahore / lahore.ahmed"]
     Seed --> Year["+ year suffixes<br/>ahmed1999 / ahmed99"]
     Seed --> Known["Known-handle mutation<br/>strip/re-add digits from confirmed handle"]
@@ -109,8 +109,8 @@ pip install -r requirements.txt
 ```
 
 ```bash
-python3 cli.py --name ahmed chaudhary \
-    --known-handle chaudharyahmed07 \
+python3 cli.py --name Muhammad Ahmad \
+    --known-handle Ahmed asad \
     --location lahore \
     --year 1999 \
     --max-variants 100 \
@@ -149,8 +149,8 @@ python3 cli.py --name ahmed chaudhary \
 [*] Loading WMN dataset...
 [*] 719 sites loaded
 [1/47] ahmedchaudhary                 -> 3 hit(s)  (2.1s)
-[2/47] chaudharyahmed07                -> 6 hit(s)  (1.9s)
-[3/47] ahmed.chaudhary                 -> 1 hit(s)  (2.3s)
+[2/47] chaudharyhammad                -> 6 hit(s)  (1.9s)
+[3/47] ahmed.hamood                 -> 1 hit(s)  (2.3s)
 ...
 [*] Done. 22 total hit(s) across 47 username(s).
 [*] Reports written: report.json / .md / .csv
