@@ -22,8 +22,8 @@ from typing import Any
 import httpx
 
 WMN_DATA_URL = "https://raw.githubusercontent.com/WebBreacher/WhatsMyName/main/wmn-data.json"
-DEFAULT_TIMEOUT = 10.0
-DEFAULT_CONCURRENCY = 30
+DEFAULT_TIMEOUT = 6.0
+DEFAULT_CONCURRENCY = 60
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -131,7 +131,24 @@ async def check_username(
     sites = dataset.get("sites", [])
     semaphore = asyncio.Semaphore(concurrency)
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    # Without explicit limits, httpx's default pool (100 total / 20 keepalive
+    # connections) silently caps real concurrency below whatever the
+    # semaphore allows. Match the pool size to the requested concurrency.
+    limits = httpx.Limits(
+        max_connections=concurrency * 2,
+        max_keepalive_connections=concurrency,
+    )
+
+    # Split timeout phases: fail fast on dead/unreachable hosts (connect)
+    # rather than waiting the full timeout on every phase independently.
+    timeout_config = httpx.Timeout(
+        connect=min(timeout, 5.0),
+        read=timeout,
+        write=5.0,
+        pool=5.0,
+    )
+
+    async with httpx.AsyncClient(timeout=timeout_config, limits=limits) as client:
         tasks = [_check_one_site(client, site, username, semaphore) for site in sites]
         results = await asyncio.gather(*tasks)
 

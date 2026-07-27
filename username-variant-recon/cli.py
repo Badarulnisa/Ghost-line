@@ -51,10 +51,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--single-only", action="store_true",
                    help="Skip variant generation; only check the exact "
                         "--name/--known-handle strings given")
-    p.add_argument("--concurrency", type=int, default=30,
-                   help="Max concurrent requests per username (default 30)")
-    p.add_argument("--timeout", type=float, default=10.0,
-                   help="Per-request timeout in seconds (default 10)")
+    p.add_argument("--concurrency", type=int, default=60,
+                   help="Max concurrent requests per username (default 60)")
+    p.add_argument("--timeout", type=float, default=6.0,
+                   help="Per-request timeout in seconds (default 6)")
     p.add_argument("--no-refresh", action="store_true",
                    help="Use cached wmn-data.json instead of fetching latest")
     p.add_argument("--output", default="report",
