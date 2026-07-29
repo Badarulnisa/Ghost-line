@@ -35,7 +35,7 @@ concurrently against WMN's ~700-site dataset.
 ## Installation
 
 ```bash
-git clone https://github.com/<you>/username-variant-recon.git
+git clone https://github.com/Badarulnisa/username-variant-recon.git
 cd username-variant-recon
 pip install -r requirements.txt
 ```
