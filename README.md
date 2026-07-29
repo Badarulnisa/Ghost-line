@@ -1,106 +1,38 @@
-<div align="center">
+# username-variant-recon
 
-#  username-variant-recon
+Async username-permutation OSINT tool built on top of the
+[WhatsMyName](https://github.com/WebBreacher/WhatsMyName) dataset.
 
-**Async username-permutation OSINT tool built on the [WhatsMyName](https://github.com/WebBreacher/WhatsMyName) dataset.**
+Standard username checkers (including the original WMN checker script) only
+check the exact string you give them. In practice, real people rarely use
+one consistent handle across every platform — they drop numbers, swap name
+order, add their city, or go by a mononym on some sites. This tool generates
+realistic candidate variants from seed identity data and checks all of them
+concurrently against WMN's ~700-site dataset.
 
-Generates realistic username variants from seed identity data, then checks all of them concurrently across ~700 sites — instead of only checking the one exact string you already know.
+## Why this exists
 
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Async](https://img.shields.io/badge/async-httpx-orange)](https://www.python-httpx.org/)
-[![Sites](https://img.shields.io/badge/sites%20checked-~700-red)](https://github.com/WebBreacher/WhatsMyName)
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen)](tests/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-blueviolet)](CONTRIBUTING.md)
+- WMN's own checker script is sequential — checking ~700 sites for one
+  username takes minutes. Checking a dozen variants that way doesn't scale.
+- No existing WMN wrapper does variant generation. You either check one
+  known handle, or you don't.
+- Most username-generation heuristics assume Western `first.last` naming
+  conventions. This tool also generates mononym-style and reordered
+  candidates common in South Asian / MENA naming conventions, which
+  Western-pattern-biased tools under-generate for.
 
-</div>
+## How it works
 
----
+1. **`variant_engine.py`** — takes seed identity data (name tokens, a known
+   real handle, birth year, location, profession, aliases) and generates a
+   deduplicated list of candidate usernames using separator variations,
+   name-order permutations, numeric suffixes, and mononym forms.
+2. **`wmn_wrapper.py`** — loads WMN's live `wmn-data.json` and checks each
+   candidate against every site **concurrently** via `httpx.AsyncClient` +
+   `asyncio.Semaphore`, instead of one request at a time.
+3. **`reporter.py`** — outputs results as JSON, Markdown, and CSV.
 
-## The problem this solves
-
-Standard username checkers — including WMN's own original script — only check the **exact string** you feed them. Real people rarely use one consistent handle everywhere. They drop digits, swap name order, add their city, or go by a mononym on some platforms.
-
-```
- You know:     chaudhary7807  (confirmed on one site)
- You're missing: ahmed · chaudhary.ahmed · ahmedpaki · ahmed99 · ...
-```
-
-This tool closes that gap — generate the realistic variants, check all of them, get one report.
-
-<br>
-
-##  How it works
-
-```mermaid
-flowchart LR
-    A[" Seed Identity<br/>name · handle · location<br/>year · profession · aliases"] --> B["variant_engine.py<br/>generates candidates"]
-    B --> C{"~50-200<br/>candidate<br/>usernames"}
-    C --> D[" wmn_wrapper.py<br/>async check vs 700 sites"]
-    D --> E[" reporter.py"]
-    E --> F1["report.json"]
-    E --> F2["report.md"]
-    E --> F3["report.csv"]
-
-    style A fill:#2d3748,stroke:#4299e1,color:#fff
-    style B fill:#2d3748,stroke:#48bb78,color:#fff
-    style C fill:#1a202c,stroke:#ed8936,color:#fff
-    style D fill:#2d3748,stroke:#48bb78,color:#fff
-    style E fill:#2d3748,stroke:#9f7aea,color:#fff
-```
-
-<br>
-
-##  Why async instead of the original sequential checker
-
-```mermaid
-gantt
-    title Time to check 700 sites × 10 username variants
-    dateFormat X
-    axisFormat %s
-
-    section Original WMN checker (sequential)
-    Variant 1  : 0, 45
-    Variant 2  : 45, 90
-    Variant 3  : 90, 135
-    "... 7 more variants" : 135, 450
-
-    section This tool (async, concurrency=30)
-    Variant 1  : 0, 4
-    Variant 2  : 4, 8
-    Variant 3  : 8, 12
-    "... 7 more variants" : 12, 40
-```
-
-Roughly a **10x** wall-clock improvement per variant by checking sites concurrently instead of one request at a time — the difference between "run it and wait 8 minutes" and "run it and it's done before you switch tabs."
-
-<br>
-
-##  Variant generation logic
-
-```mermaid
-graph TD
-    Seed(["Seed: ahmed + chaudhary<br/>location=lahore, year=1999"]) --> Order["Name-order permutations<br/>ahmed.chaudhary / chaudhary.ahmed"]
-    Seed --> Mono["Mononym forms<br/>ahmed / masood"]
-    Seed --> Loc["+ location<br/>ahmedlahore / lahore.ahmed"]
-    Seed --> Year["+ year suffixes<br/>ahmed1999 / ahmed99"]
-    Seed --> Known["Known-handle mutation<br/>strip/re-add digits from confirmed handle"]
-
-    Order --> Pool[("Deduplicated<br/>candidate pool")]
-    Mono --> Pool
-    Loc --> Pool
-    Year --> Pool
-    Known --> Pool
-
-    style Seed fill:#1a202c,stroke:#4299e1,color:#fff
-    style Pool fill:#1a202c,stroke:#ed8936,color:#fff
-```
-
-Unlike most username tools (which assume Western `first.last` order), this engine also generates **mononym and reordered forms** common in South Asian / MENA naming conventions — a gap in most existing OSINT tooling.
-
-<br>
-
-##  Quick start
+## Installation
 
 ```bash
 git clone https://github.com/<you>/username-variant-recon.git
@@ -108,136 +40,86 @@ cd username-variant-recon
 pip install -r requirements.txt
 ```
 
+## Usage
+
 ```bash
-python3 cli.py --name Muhammad Ahmad \
-    --known-handle Ahmed asad \
+# Generate variants from seed data and check all of them
+python3 cli.py --name ahmed chaudhary \
+    --known-handle chaudharyahmed07 \
     --location lahore \
     --year 1999 \
     --max-variants 100 \
     --output report
+
+# Check exact strings only, no variant generation
+python3 cli.py --name someexacthandle --single-only
 ```
 
-<details>
-<summary><b> Full CLI options (click to expand)</b></summary>
-
-<br>
+### Options
 
 | Flag | Description |
 |---|---|
-| `--name` | One or more name tokens *(required)* |
+| `--name` | One or more name tokens (required) |
 | `--known-handle` | A confirmed real handle, used as a mutation seed |
 | `--location` | City/region to try as prefix/suffix |
 | `--profession` | Field/profession token to try as prefix/suffix |
 | `--year` | Birth year (also tries 2-digit form) |
 | `--extra` | Additional nickname/alias tokens |
-| `--max-variants` | Cap on generated variants *(default 200)* |
+| `--max-variants` | Cap on generated variants (default 200) |
 | `--single-only` | Skip generation, check exact `--name`/`--known-handle` only |
-| `--concurrency` | Max concurrent requests per username *(default 30)* |
-| `--timeout` | Per-request timeout in seconds *(default 10)* |
+| `--concurrency` | Max concurrent requests per username (default 30) |
 | `--no-refresh` | Use cached dataset instead of fetching latest |
-| `--output` | Output file basename *(writes `.json` / `.md` / `.csv`)* |
 
-</details>
+Output: `report.json`, `report.md`, `report.csv`.
 
-<details>
-<summary><b> Example output (click to expand)</b></summary>
+## ⚠️ Interpreting results — read this
 
-<br>
+**A hit means a username exists on that site. It does not mean it's the
+same person.** Common usernames get reused/squatted constantly. Before
+drawing any conclusion from a hit:
 
-```
-[*] 47 candidate username(s) to check
-[*] Loading WMN dataset...
-[*] 719 sites loaded
-[1/47] ahmedchaudhary                 -> 3 hit(s)  (2.1s)
-[2/47] chaudharyhammad                -> 6 hit(s)  (1.9s)
-[3/47] ahmed.hamood                 -> 1 hit(s)  (2.3s)
-...
-[*] Done. 22 total hit(s) across 47 username(s).
-[*] Reports written: report.json / .md / .csv
-```
+- Compare profile photo, bio text, and posting activity against your
+  target's known-confirmed profiles
+- Check for cross-links (does the profile link back to other confirmed
+  accounts?)
+- Treat single-site hits on generic sites with skepticism; treat hits
+  clustered across niche/related sites with more confidence
 
-**`report.md` excerpt:**
+This tool surfaces candidates for manual verification. It does not, and
+cannot, confirm identity on its own.
 
-```markdown
-## `chaudharyahmed07` — 6 hit(s)
+## Ethics & legal use
 
-**coding**
-- [GitHub (User)](https://github.com/chaudharyahmed07)
-- [GitLab](https://gitlab.com/chaudharyahmed07)
+This tool only checks **public existence** of a username via each site's
+normal profile-lookup response — the same request your browser makes when
+you visit a profile URL. It does not authenticate, bypass access controls,
+or retrieve private data.
 
-**social**
-- [Twitter/X](https://twitter.com/chaudharyahmed07)
-```
+Use this only against usernames/identities you have a legitimate reason to
+investigate (your own accounts, authorized engagements, or personal
+research where you are not violating platform ToS or harassment/stalking
+laws in your jurisdiction). Do not use this to enable harassment, doxxing,
+or stalking.
 
-</details>
+## Roadmap
 
-<br>
+- [x] v1: variant generation + async WMN checking + JSON/MD/CSV reports
+- [ ] Cross-platform correlation: perceptual-hash profile photo comparison
+      (`imagehash`) + fuzzy bio/display-name matching (`rapidfuzz`) to
+      auto-flag which hits are likely the same identity
+- [ ] Graph output (NetworkX / pyvis) — visual entity map of
+      username → sites → correlated identity clusters; Maltego-compatible
+      CSV export
+- [ ] Wayback Machine fallback — check CDX API for historical profile
+      existence on sites that now return "not found" (deleted/deactivated
+      accounts)
+- [ ] Site reliability scoring — weight hits using WMN's known
+      false-positive-prone site list
+- [ ] Stealth mode — randomized delay + UA rotation profile, alongside a
+      fast/max-concurrency profile
+- [ ] Culturally-aware variant generation beyond South Asian/MENA
+      mononym patterns — configurable naming-convention profiles
 
-##  Result confidence — read before drawing conclusions
+## License
 
-```mermaid
-graph LR
-    Hit(["Username found<br/>on site"]) --> Q1{"Matches known<br/>avatar/bio?"}
-    Q1 -->|Yes| Q2{"Cross-links to<br/>other confirmed<br/>profiles?"}
-    Q1 -->|No/Unknown| Low(["🟡 Low confidence<br/>possible squat/coincidence"])
-    Q2 -->|Yes| High(["🟢 High confidence"])
-    Q2 -->|No| Med(["🟠 Medium confidence<br/>verify manually"])
-
-    style Hit fill:#1a202c,stroke:#4299e1,color:#fff
-    style High fill:#1a202c,stroke:#48bb78,color:#fff
-    style Med fill:#1a202c,stroke:#ed8936,color:#fff
-    style Low fill:#1a202c,stroke:#e53e3e,color:#fff
-```
-
-A hit means the username **exists** on that site — nothing more. Common handles get squatted constantly. Verify manually before treating any hit as confirmed identity.
-
-<br>
-
-##  Roadmap
-
-- [x] **v1** — variant generation + async WMN checking + JSON/MD/CSV reports
-- [ ] **v1.1** — Cross-platform correlation: perceptual-hash photo comparison (`imagehash`) + fuzzy bio/name matching (`rapidfuzz`) to auto-flag likely-same-identity clusters
-- [ ] **v1.2** — Graph output (NetworkX/pyvis) — visual entity map, Maltego-compatible CSV export
-- [ ] **v1.3** — Wayback Machine fallback for deleted/deactivated accounts
-- [ ] **v1.4** — Site reliability scoring using WMN's known false-positive-prone list
-- [ ] **v1.5** — Stealth mode (randomized delay + UA rotation) alongside fast mode
-- [ ] **v2** — Configurable naming-convention profiles beyond South Asian/MENA patterns
-
-<br>
-
-##  Ethics & legal use
-
-This tool only checks **public existence** of a username via each site's normal profile-lookup response — the same request your browser makes visiting a profile URL. It does not authenticate, bypass access controls, or retrieve private data.
-
-Use only against identities you have legitimate reason to investigate — your own accounts, authorized engagements, or personal research that doesn't violate platform ToS or harassment/stalking laws in your jurisdiction.
-
-<br>
-
-## Architecture
-
-```
-username-variant-recon/
-├── cli.py                   # entrypoint — argparse, orchestration
-├── src/
-│   ├── variant_engine.py    # candidate generation (pure logic, unit-tested)
-│   ├── wmn_wrapper.py       # async dataset fetch + concurrent site checks
-│   └── reporter.py          # JSON / Markdown / CSV output
-├── tests/
-│   └── test_variant_engine.py
-├── requirements.txt
-└── LICENSE
-```
-
-<br>
-
-##  Credits
-
-Built on top of the [WhatsMyName](https://github.com/WebBreacher/WhatsMyName) dataset by Micah "WebBreacher" Hoffman and contributors — this tool wraps their data, it doesn't replace it. Go star that repo too.
-
-<br>
-
-<div align="center">
-
-**License:** MIT — see [LICENSE](LICENSE)
-
-</div>
+MIT — see [LICENSE](LICENSE).
