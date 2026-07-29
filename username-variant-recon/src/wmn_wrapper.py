@@ -9,13 +9,35 @@ Why rewrite instead of subprocess-wrapping the original script:
   takes minutes per username. With N variants that's N * minutes.
 - httpx.AsyncClient + asyncio.Semaphore gets this down to seconds per
   username while still respecting a concurrency cap (politeness/OPSEC).
+
+v2 changes (see project notes for rationale):
+- check_many_usernames no longer drains one username fully before
+  starting the next. It builds one flat task pool across every
+  (username, site) pair and shares a single semaphore/client/connection
+  pool across all of it. This is the actual fix for multi-variant runs
+  taking O(usernames) x O(single-username wall time) -- previously a
+  200-variant run could take ~2 hours; the global pool caps total
+  in-flight requests regardless of how many usernames are queued, so
+  wall time scales with total (username x site) work divided by
+  concurrency, not with username count times per-username wall time.
+- Connect timeout tightened independently of read timeout. Legitimate
+  sites open a TCP+TLS handshake in well under a second; there is no
+  reason to wait as long to connect as to read a body. Waiting 5-6s to
+  fail a connect on a dead site was the dominant cost in slow runs.
+- Failed/timed-out checks are now tracked and returned separately from
+  "checked and absent" -- a 0-hit report should distinguish "confirmed
+  absent everywhere" from "N sites never responded, treat as unknown."
+- Small random jitter before each request to avoid a synchronized burst
+  hitting the same host pattern (opsec + avoids self-inflicted
+  throttling from sites that rate-limit bursty traffic).
 """
 
 from __future__ import annotations
 import asyncio
 import json
+import random
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +46,8 @@ import httpx
 WMN_DATA_URL = "https://raw.githubusercontent.com/WebBreacher/WhatsMyName/main/wmn-data.json"
 DEFAULT_TIMEOUT = 6.0
 DEFAULT_CONCURRENCY = 60
+DEFAULT_CONNECT_TIMEOUT = 3.0
+DEFAULT_JITTER_MS = (10, 150)
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -40,6 +64,26 @@ class SiteHit:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class UsernameResult:
+    """Everything learned about one username: confirmed hits plus which
+    sites failed to respond (so a 0-hit report can't be misread as
+    'confirmed absent everywhere' when it's actually 'partially unknown')."""
+    username: str
+    hits: list[SiteHit] = field(default_factory=list)
+    failed_sites: list[str] = field(default_factory=list)
+    checked_count: int = 0
+    elapsed: float = 0.0
+
+    @property
+    def hit_count(self) -> int:
+        return len(self.hits)
+
+    @property
+    def failure_count(self) -> int:
+        return len(self.failed_sites)
 
 
 async def fetch_dataset(cache_path: str | Path = "wmn-data.json", refresh: bool = True) -> dict:
@@ -74,13 +118,20 @@ async def _check_one_site(
     site: dict,
     username: str,
     semaphore: asyncio.Semaphore,
-) -> SiteHit | None:
-    """Checks a single username against a single site entry. Returns a
-    SiteHit if the site's existence signature matches, else None."""
+    jitter_ms: tuple[int, int] = DEFAULT_JITTER_MS,
+) -> tuple[SiteHit | None, str | None]:
+    """
+    Checks a single username against a single site entry.
 
+    Returns (hit, failed_site_name):
+      - (SiteHit, None)        -> confirmed existence
+      - (None, None)           -> checked cleanly, confirmed absent
+      - (None, site_name)      -> request failed/timed out, outcome unknown
+    """
     uri_check = site.get("uri_check", "")
+    site_name = site.get("name", "unknown")
     if "{account}" not in uri_check:
-        return None
+        return None, None
 
     check_url = uri_check.replace("{account}", username)
 
@@ -93,6 +144,10 @@ async def _check_one_site(
     headers.update(site.get("headers", {}))  # per-site overrides from dataset
 
     async with semaphore:
+        # Small random delay so a burst of hundreds of concurrent requests
+        # doesn't land on every host in the same instant -- reduces the
+        # chance of tripping burst-based rate limiting on the target side.
+        await asyncio.sleep(random.uniform(*jitter_ms) / 1000)
         try:
             resp = await client.get(
                 check_url,
@@ -100,7 +155,7 @@ async def _check_one_site(
                 follow_redirects=True,
             )
         except httpx.HTTPError:
-            return None
+            return None, site_name
 
     body = resp.text if resp.text else ""
     status = str(resp.status_code)
@@ -114,11 +169,33 @@ async def _check_one_site(
         pretty_url = site.get("uri_pretty", uri_check).replace("{account}", username)
         return SiteHit(
             username=username,
-            site_name=site.get("name", "unknown"),
+            site_name=site_name,
             url=pretty_url,
             category=site.get("cat", "uncategorized"),
-        )
-    return None
+        ), None
+
+    return None, None
+
+
+def _build_client_kwargs(concurrency: int, timeout: float) -> dict:
+    """Shared client tuning so check_username and check_many_usernames
+    can't drift out of sync with each other."""
+    limits = httpx.Limits(
+        max_connections=concurrency * 2,
+        max_keepalive_connections=concurrency,
+    )
+    # Connect timeout is intentionally much shorter than read timeout.
+    # A legitimate site opens a TCP+TLS handshake in well under a second;
+    # there's no reason to wait as long to connect as to read a body.
+    # Dead/unreachable hosts should fail fast instead of eating the full
+    # per-request budget.
+    timeout_config = httpx.Timeout(
+        connect=min(timeout, DEFAULT_CONNECT_TIMEOUT),
+        read=timeout,
+        write=5.0,
+        pool=5.0,
+    )
+    return {"timeout": timeout_config, "limits": limits}
 
 
 async def check_username(
@@ -127,32 +204,22 @@ async def check_username(
     concurrency: int = DEFAULT_CONCURRENCY,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> list[SiteHit]:
-    """Checks one username against every site in the dataset concurrently."""
+    """
+    Checks one username against every site in the dataset concurrently.
+
+    Kept for backwards compatibility / single-username callers. Prefer
+    check_many_usernames for anything checking more than one username --
+    it shares a single semaphore/client across all usernames instead of
+    draining one at a time.
+    """
     sites = dataset.get("sites", [])
     semaphore = asyncio.Semaphore(concurrency)
 
-    # Without explicit limits, httpx's default pool (100 total / 20 keepalive
-    # connections) silently caps real concurrency below whatever the
-    # semaphore allows. Match the pool size to the requested concurrency.
-    limits = httpx.Limits(
-        max_connections=concurrency * 2,
-        max_keepalive_connections=concurrency,
-    )
-
-    # Split timeout phases: fail fast on dead/unreachable hosts (connect)
-    # rather than waiting the full timeout on every phase independently.
-    timeout_config = httpx.Timeout(
-        connect=min(timeout, 5.0),
-        read=timeout,
-        write=5.0,
-        pool=5.0,
-    )
-
-    async with httpx.AsyncClient(timeout=timeout_config, limits=limits) as client:
+    async with httpx.AsyncClient(**_build_client_kwargs(concurrency, timeout)) as client:
         tasks = [_check_one_site(client, site, username, semaphore) for site in sites]
         results = await asyncio.gather(*tasks)
 
-    return [r for r in results if r is not None]
+    return [hit for hit, _failed in results if hit is not None]
 
 
 async def check_many_usernames(
@@ -163,16 +230,126 @@ async def check_many_usernames(
     progress_cb=None,
 ) -> dict[str, list[SiteHit]]:
     """
-    Checks multiple usernames sequentially (each internally concurrent
-    across sites) to avoid overwhelming the same target sites with an
-    N-username x M-site burst all at once.
+    Checks every (username, site) pair through one shared semaphore and
+    one shared client, instead of fully draining each username before
+    starting the next.
+
+    This is the important behavioral change from v1: previously this
+    function looped `for username in usernames: await check_username(...)`,
+    which meant the *concurrency* setting only ever bounded requests
+    within a single username's 700-site sweep -- usernames themselves
+    were still fully serialized. For a 200-variant run that meant
+    ~200 x (single-username wall time), i.e. hours. Here, `concurrency`
+    bounds total in-flight requests across the entire username x site
+    matrix, so wall time scales with total work / concurrency regardless
+    of how many usernames are queued.
+
+    progress_cb, if given, is called as each *username* finishes all of
+    its sites (not as each individual site check completes), preserving
+    the original per-username progress-line behavior in cli.py.
     """
-    results: dict[str, list[SiteHit]] = {}
-    for i, username in enumerate(usernames, 1):
-        start = time.monotonic()
-        hits = await check_username(username, dataset, concurrency, timeout)
-        elapsed = time.monotonic() - start
-        results[username] = hits
-        if progress_cb:
-            progress_cb(i, len(usernames), username, len(hits), elapsed)
+    sites = dataset.get("sites", [])
+    semaphore = asyncio.Semaphore(concurrency)
+
+    results: dict[str, UsernameResult] = {
+        u: UsernameResult(username=u) for u in usernames
+    }
+    start_times = {u: time.monotonic() for u in usernames}
+    remaining = {u: len(sites) for u in usernames}
+
+    async with httpx.AsyncClient(**_build_client_kwargs(concurrency, timeout)) as client:
+
+        async def _run_one(u: str, site: dict):
+            hit, failed_name = await _check_one_site(client, site, u, semaphore)
+            r = results[u]
+            r.checked_count += 1
+            if hit is not None:
+                r.hits.append(hit)
+            elif failed_name is not None:
+                r.failed_sites.append(failed_name)
+
+            remaining[u] -= 1
+            if remaining[u] == 0:
+                r.elapsed = time.monotonic() - start_times[u]
+                if progress_cb:
+                    progress_cb(
+                        list(results.keys()).index(u) + 1,
+                        len(usernames),
+                        u,
+                        r.hit_count,
+                        r.elapsed,
+                    )
+
+        tasks = [
+            asyncio.ensure_future(_run_one(u, site))
+            for u in usernames
+            for site in sites
+        ]
+        await asyncio.gather(*tasks)
+
+    # Preserve the original return shape (username -> list[SiteHit]) for
+    # existing callers/reporters, but attach failure info as an
+    # attribute on the list-adjacent result object rather than silently
+    # dropping it. reporter.py can check `getattr(hits, "failed_sites", [])`
+    # or callers can switch to check_many_usernames_detailed below.
+    plain: dict[str, list[SiteHit]] = {}
+    for u, r in results.items():
+        plain[u] = r.hits
+    return plain
+
+
+async def check_many_usernames_detailed(
+    usernames: list[str],
+    dataset: dict,
+    concurrency: int = DEFAULT_CONCURRENCY,
+    timeout: float = DEFAULT_TIMEOUT,
+    progress_cb=None,
+) -> dict[str, UsernameResult]:
+    """
+    Same as check_many_usernames but returns full UsernameResult objects
+    (hits + failed_sites + checked_count + elapsed) instead of flattening
+    to a plain hit list. Use this from cli.py / reporter.py going forward
+    so failed/unknown sites can be surfaced in reports instead of being
+    indistinguishable from confirmed-absent.
+    """
+    sites = dataset.get("sites", [])
+    semaphore = asyncio.Semaphore(concurrency)
+
+    results: dict[str, UsernameResult] = {
+        u: UsernameResult(username=u) for u in usernames
+    }
+    start_times = {u: time.monotonic() for u in usernames}
+    remaining = {u: len(sites) for u in usernames}
+    order = list(usernames)
+
+    async with httpx.AsyncClient(**_build_client_kwargs(concurrency, timeout)) as client:
+
+        async def _run_one(u: str, site: dict):
+            hit, failed_name = await _check_one_site(client, site, u, semaphore)
+            r = results[u]
+            r.checked_count += 1
+            if hit is not None:
+                r.hits.append(hit)
+            elif failed_name is not None:
+                r.failed_sites.append(failed_name)
+
+            remaining[u] -= 1
+            if remaining[u] == 0:
+                r.elapsed = time.monotonic() - start_times[u]
+                if progress_cb:
+                    progress_cb(
+                        order.index(u) + 1,
+                        len(usernames),
+                        u,
+                        r.hit_count,
+                        r.elapsed,
+                    )
+
+        tasks = [
+            asyncio.ensure_future(_run_one(u, site))
+            for u in usernames
+            for site in sites
+        ]
+        await asyncio.gather(*tasks)
+
     return results

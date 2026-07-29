@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from variant_engine import SeedIdentity, generate_variants
-from wmn_wrapper import fetch_dataset, check_many_usernames
+from wmn_wrapper import fetch_dataset, check_many_usernames_detailed
 from reporter import write_json_report, write_markdown_report, write_csv_report
 
 
@@ -52,9 +52,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Skip variant generation; only check the exact "
                         "--name/--known-handle strings given")
     p.add_argument("--concurrency", type=int, default=60,
-                   help="Max concurrent requests per username (default 60)")
+                   help="Max concurrent requests across the whole run "
+                        "(shared across all usernames, default 60)")
     p.add_argument("--timeout", type=float, default=6.0,
-                   help="Per-request timeout in seconds (default 6)")
+                   help="Per-request read timeout in seconds (default 6). "
+                        "Connect timeout is capped separately at 3s.")
     p.add_argument("--no-refresh", action="store_true",
                    help="Use cached wmn-data.json instead of fetching latest")
     p.add_argument("--output", default="report",
@@ -87,7 +89,12 @@ async def run(args: argparse.Namespace) -> dict:
     dataset = await fetch_dataset(refresh=not args.no_refresh)
     print(f"[*] {len(dataset.get('sites', []))} sites loaded")
 
-    results = await check_many_usernames(
+    # check_many_usernames_detailed runs every (username, site) pair through
+    # one shared semaphore/client rather than draining one username's full
+    # site sweep before starting the next -- see wmn_wrapper.py notes.
+    # It also returns UsernameResult objects so unresolved (no-response)
+    # sites are tracked separately from confirmed-absent ones.
+    results = await check_many_usernames_detailed(
         usernames,
         dataset,
         concurrency=args.concurrency,
@@ -101,8 +108,12 @@ def main():
     args = build_arg_parser().parse_args()
     results = asyncio.run(run(args))
 
-    total_hits = sum(len(hits) for hits in results.values())
+    total_hits = sum(r.hit_count for r in results.values())
+    total_failed = sum(r.failure_count for r in results.values())
     print(f"\n[*] Done. {total_hits} total hit(s) across {len(results)} username(s).")
+    if total_failed:
+        print(f"[*] {total_failed} site check(s) did not respond — see report for details "
+              f"(these are unresolved, not confirmed-absent).")
 
     write_json_report(results, f"{args.output}.json")
     write_markdown_report(results, f"{args.output}.md")
