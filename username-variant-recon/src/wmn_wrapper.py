@@ -30,18 +30,71 @@ v2 changes (see project notes for rationale):
 - Small random jitter before each request to avoid a synchronized burst
   hitting the same host pattern (opsec + avoids self-inflicted
   throttling from sites that rate-limit bursty traffic).
+
+v3 changes:
+- IPv4-only DNS resolution, opt-out via WMN_FORCE_IPV4=0 (see block
+  below). Fixes VMs/networks with dual-stack DNS but no IPv6 route
+  (e.g. default VMware/VirtualBox NAT setups), where connections were
+  wasting connect-timeout budget on a dead IPv6 path -- observed on a
+  Kali VM as ~90%+ of sites reporting "unresolved" regardless of
+  concurrency/timeout tuning, while curl (which falls back to IPv4
+  automatically) reached the same hosts in under a second. The patch
+  is now gated behind an env var and logs once when active, rather
+  than silently and permanently disabling IPv6 for the whole process
+  the moment this module is imported -- a global, silent monkeypatch
+  would otherwise break anything else in the same process that
+  legitimately needs IPv6, with no visible signal as to why.
+- Exception logging switched from str(e) to repr(e). str() on some
+  httpx/socket exceptions returns an empty string even when the
+  exception *type* is informative (ConnectError vs. ConnectTimeout vs.
+  DNS failure) -- this was directly responsible for a confusing
+  "Live fetch failed ()" log line with no actual information in it
+  during debugging of the IPv6 issue above.
 """
 
 from __future__ import annotations
 import asyncio
 import json
+import os
 import random
+import socket
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+# --- IPv4-only DNS resolution (opt-out via WMN_FORCE_IPV4=0) -------------
+# Some environments (notably NAT-mode VMs like the default VMware/VirtualBox
+# Kali setup) resolve dual-stack DNS (both A and AAAA records) but only have
+# an IPv4 default route -- there is no IPv6 route at all. asyncio/httpx will
+# still attempt the IPv6 address first for every connection, and under high
+# concurrency many of those attempts eat a meaningful chunk of the
+# connect-timeout budget before falling back to IPv4, rather than failing
+# instantly the way curl does. Across hundreds of concurrent per-site
+# connections this manifests as most requests going "unresolved" regardless
+# of concurrency/timeout tuning.
+#
+# Monkeypatching socket.getaddrinfo to strip AF_INET6 results forces every
+# resolution done by asyncio's default resolver to return IPv4 addresses
+# only, avoiding the dead route entirely. Safe no-op on networks that do
+# have real IPv6 connectivity -- IPv4 still works everywhere IPv6 would.
+# Gated behind an env var (default ON) so it's discoverable and reversible
+# instead of a silent, permanent, process-wide side effect of importing
+# this module -- set WMN_FORCE_IPV4=0 if you're on a network that actually
+# needs IPv6 (e.g. an IPv6-only target).
+_FORCE_IPV4 = os.environ.get("WMN_FORCE_IPV4", "1") != "0"
+
+if _FORCE_IPV4:
+    _orig_getaddrinfo = socket.getaddrinfo
+
+    def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+    socket.getaddrinfo = _ipv4_only_getaddrinfo
+    print("[*] IPv4-only DNS resolution forced (set WMN_FORCE_IPV4=0 to disable)")
+# -------------------------------------------------------------------------
 
 WMN_DATA_URL = "https://raw.githubusercontent.com/WebBreacher/WhatsMyName/main/wmn-data.json"
 DEFAULT_TIMEOUT = 6.0
@@ -89,7 +142,7 @@ class UsernameResult:
 async def fetch_dataset(cache_path: str | Path = "wmn-data.json", refresh: bool = True) -> dict:
     """
     Downloads the latest WMN dataset. Falls back to local cache if the
-    network fetch fails (offline use / rate limiting).
+    network fetch fails (offline use / rate limiting / IPv6-less network).
     """
     cache_path = Path(cache_path)
 
@@ -104,9 +157,9 @@ async def fetch_dataset(cache_path: str | Path = "wmn-data.json", refresh: bool 
         except (httpx.HTTPError, json.JSONDecodeError) as e:
             if not cache_path.exists():
                 raise RuntimeError(
-                    f"Could not fetch WMN dataset and no local cache exists: {e}"
+                    f"Could not fetch WMN dataset and no local cache exists: {e!r}"
                 ) from e
-            print(f"[!] Live fetch failed ({e}), falling back to cached dataset")
+            print(f"[!] Live fetch failed ({e!r}), falling back to cached dataset")
 
     if not cache_path.exists():
         raise RuntimeError("No cached wmn-data.json found and refresh=False")
@@ -208,9 +261,9 @@ async def check_username(
     Checks one username against every site in the dataset concurrently.
 
     Kept for backwards compatibility / single-username callers. Prefer
-    check_many_usernames for anything checking more than one username --
-    it shares a single semaphore/client across all usernames instead of
-    draining one at a time.
+    check_many_usernames_detailed for anything checking more than one
+    username -- it shares a single semaphore/client across all usernames
+    instead of draining one at a time.
     """
     sites = dataset.get("sites", [])
     semaphore = asyncio.Semaphore(concurrency)
@@ -244,9 +297,8 @@ async def check_many_usernames(
     matrix, so wall time scales with total work / concurrency regardless
     of how many usernames are queued.
 
-    progress_cb, if given, is called as each *username* finishes all of
-    its sites (not as each individual site check completes), preserving
-    the original per-username progress-line behavior in cli.py.
+    Kept for callers that only want the plain {username: [SiteHit]} shape.
+    Prefer check_many_usernames_detailed to also get failed_sites tracking.
     """
     sites = dataset.get("sites", [])
     semaphore = asyncio.Semaphore(concurrency)
@@ -256,6 +308,7 @@ async def check_many_usernames(
     }
     start_times = {u: time.monotonic() for u in usernames}
     remaining = {u: len(sites) for u in usernames}
+    order = list(usernames)
 
     async with httpx.AsyncClient(**_build_client_kwargs(concurrency, timeout)) as client:
 
@@ -272,13 +325,7 @@ async def check_many_usernames(
             if remaining[u] == 0:
                 r.elapsed = time.monotonic() - start_times[u]
                 if progress_cb:
-                    progress_cb(
-                        list(results.keys()).index(u) + 1,
-                        len(usernames),
-                        u,
-                        r.hit_count,
-                        r.elapsed,
-                    )
+                    progress_cb(order.index(u) + 1, len(usernames), u, r.hit_count, r.elapsed)
 
         tasks = [
             asyncio.ensure_future(_run_one(u, site))
@@ -287,15 +334,7 @@ async def check_many_usernames(
         ]
         await asyncio.gather(*tasks)
 
-    # Preserve the original return shape (username -> list[SiteHit]) for
-    # existing callers/reporters, but attach failure info as an
-    # attribute on the list-adjacent result object rather than silently
-    # dropping it. reporter.py can check `getattr(hits, "failed_sites", [])`
-    # or callers can switch to check_many_usernames_detailed below.
-    plain: dict[str, list[SiteHit]] = {}
-    for u, r in results.items():
-        plain[u] = r.hits
-    return plain
+    return {u: r.hits for u, r in results.items()}
 
 
 async def check_many_usernames_detailed(
@@ -308,8 +347,8 @@ async def check_many_usernames_detailed(
     """
     Same as check_many_usernames but returns full UsernameResult objects
     (hits + failed_sites + checked_count + elapsed) instead of flattening
-    to a plain hit list. Use this from cli.py / reporter.py going forward
-    so failed/unknown sites can be surfaced in reports instead of being
+    to a plain hit list. Use this from cli.py / reporter.py so
+    failed/unknown sites can be surfaced in reports instead of being
     indistinguishable from confirmed-absent.
     """
     sites = dataset.get("sites", [])
@@ -337,13 +376,7 @@ async def check_many_usernames_detailed(
             if remaining[u] == 0:
                 r.elapsed = time.monotonic() - start_times[u]
                 if progress_cb:
-                    progress_cb(
-                        order.index(u) + 1,
-                        len(usernames),
-                        u,
-                        r.hit_count,
-                        r.elapsed,
-                    )
+                    progress_cb(order.index(u) + 1, len(usernames), u, r.hit_count, r.elapsed)
 
         tasks = [
             asyncio.ensure_future(_run_one(u, site))
