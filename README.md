@@ -118,7 +118,7 @@ python3 cli.py --name Muhammad Ahmad \
 ```
 
 <details>
-<summary><b>📖 Full CLI options (click to expand)</b></summary>
+<summary><b> Full CLI options (click to expand)</b></summary>
 
 <br>
 
