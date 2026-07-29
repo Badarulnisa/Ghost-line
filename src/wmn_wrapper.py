@@ -196,10 +196,7 @@ async def _check_one_site(
     headers = {"User-Agent": DEFAULT_USER_AGENT}
     headers.update(site.get("headers", {}))  # per-site overrides from dataset
 
-    async with semaphore:
-        # Small random delay so a burst of hundreds of concurrent requests
-        # doesn't land on every host in the same instant -- reduces the
-        # chance of tripping burst-based rate limiting on the target side.
+  async with semaphore:
         await asyncio.sleep(random.uniform(*jitter_ms) / 1000)
         try:
             resp = await client.get(
@@ -207,7 +204,9 @@ async def _check_one_site(
                 headers=headers,
                 follow_redirects=True,
             )
-        except httpx.HTTPError:
+        except httpx.HTTPError as e:
+            with open("debug_failures.log", "a") as f:
+                f.write(f"{site_name}\t{type(e).__name__}\t{e!r}\n")
             return None, site_name
 
     body = resp.text if resp.text else ""
