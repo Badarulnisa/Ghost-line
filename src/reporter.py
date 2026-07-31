@@ -126,12 +126,9 @@ def write_markdown_report(results: dict[str, UsernameResult], path: str) -> None
 
         if r.failed_sites:
             lines.append(
-                f"<details><summary>{r.failure_count} unresolved site(s) "
-                f"(no response — not checked as absent)</summary>\n"
+                f"_{r.failure_count} site(s) did not respond and were not "
+                f"checked (see the CSV report for the full list)._\n"
             )
-            for site_name in r.failed_sites:
-                lines.append(f"- {site_name}")
-            lines.append("\n</details>\n")
 
     try:
         p.write_text("\n".join(lines), encoding="utf-8")

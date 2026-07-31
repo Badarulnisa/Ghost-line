@@ -323,7 +323,18 @@ async def check_many_usernames_detailed(
                 if progress_cb:
                     progress_cb(position[u], len(usernames), u, r.hit_count, r.elapsed)
 
-        tasks = [_run_one(u, site) for u in usernames for site in sites]
+        # Building tasks username-major (all of user A's sites, then all of
+        # user B's) defeats the point of a shared semaphore: asyncio grants
+        # the semaphore roughly in task-creation order, so with many
+        # usernames queued this degenerates into draining one username's
+        # entire site list before meaningfully starting the next -- total
+        # wall time ends up close to O(usernames) x O(single-username time)
+        # instead of O(total checks / concurrency). Shuffling breaks that
+        # ordering so every (username, site) pair competes for the same
+        # pool of concurrent slots from the start.
+        pairs = [(u, site) for u in usernames for site in sites]
+        random.shuffle(pairs)
+        tasks = [_run_one(u, site) for u, site in pairs]
         # return_exceptions=True: _run_one already catches everything it
         # reasonably can, but this is the backstop -- without it, gather()
         # cancels every sibling task the instant any one of them raises,
