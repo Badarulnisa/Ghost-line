@@ -8,3 +8,4 @@ report.md
 report.csv
 *.log
 .DS_Store
+investigation.json
