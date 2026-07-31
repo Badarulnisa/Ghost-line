@@ -13,6 +13,19 @@ Usage:
     python3 cli.py --name ahmed chaudhary --single-only   # skip variant gen,
                                                             # just check the
                                                             # exact names given
+
+v2 changes:
+- --timeout help text now matches the actual default (10.0, not 6).
+- Output path's parent directory is created up front with a clear
+  error message if that fails, instead of letting reporter.py's
+  unguarded write raise deep in the call stack with no context.
+- The whole run is wrapped in a top-level try/except so a single
+  unexpected failure prints a clear message and a non-zero exit code
+  instead of a raw traceback -- most of the reliability work already
+  happened inside wmn_wrapper.py (gather no longer aborts the run on
+  one bad response), this closes the remaining gap at the CLI layer.
+- --single-only --help text now notes that --known-handle is still
+  included in the check list in that mode.
 """
 
 from __future__ import annotations
@@ -25,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from variant_engine import SeedIdentity, generate_variants
 from wmn_wrapper import fetch_dataset, check_many_usernames_detailed
-from reporter import write_json_report, write_markdown_report, write_csv_report
+from reporter import write_json_report, write_markdown_report, write_csv_report, ReportWriteError
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -37,7 +50,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--name", nargs="+", required=True,
                    help="One or more name tokens, e.g. --name ahmed chaudhary")
     p.add_argument("--known-handle", default=None,
-                   help="A confirmed real handle to seed further mutation")
+                   help="A confirmed real handle to seed further mutation. "
+                        "Also included as-is in the check list under --single-only.")
     p.add_argument("--location", default=None,
                    help="City/region token to try as a suffix/prefix")
     p.add_argument("--profession", default=None,
@@ -54,13 +68,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--concurrency", type=int, default=60,
                    help="Max concurrent requests across the whole run "
                         "(shared across all usernames, default 60)")
-    p.add_argument("--timeout", type=float, default=6.0,
-                   help="Per-request read timeout in seconds (default 6). "
+    p.add_argument("--timeout", type=float, default=10.0,
+                   help="Per-request read timeout in seconds (default 10). "
                         "Connect timeout is capped separately at 3s.")
     p.add_argument("--no-refresh", action="store_true",
                    help="Use cached wmn-data.json instead of fetching latest")
     p.add_argument("--output", default="report",
-                   help="Output file basename (writes .json/.md/.csv)")
+                   help="Output file basename (writes .json/.md/.csv); "
+                        "parent directories are created if needed")
     return p
 
 
@@ -91,9 +106,8 @@ async def run(args: argparse.Namespace) -> dict:
 
     # check_many_usernames_detailed runs every (username, site) pair through
     # one shared semaphore/client rather than draining one username's full
-    # site sweep before starting the next -- see wmn_wrapper.py notes.
-    # It also returns UsernameResult objects so unresolved (no-response)
-    # sites are tracked separately from confirmed-absent ones.
+    # site sweep before starting the next, and no longer aborts the whole
+    # run if one response is malformed -- see wmn_wrapper.py notes.
     results = await check_many_usernames_detailed(
         usernames,
         dataset,
@@ -104,9 +118,14 @@ async def run(args: argparse.Namespace) -> dict:
     return results
 
 
-def main():
+def main() -> int:
     args = build_arg_parser().parse_args()
-    results = asyncio.run(run(args))
+
+    try:
+        results = asyncio.run(run(args))
+    except Exception as e:
+        print(f"[!] Run failed: {e!r}", file=sys.stderr)
+        return 1
 
     total_hits = sum(r.hit_count for r in results.values())
     total_failed = sum(r.failure_count for r in results.values())
@@ -115,11 +134,17 @@ def main():
         print(f"[*] {total_failed} site check(s) did not respond — see report for details "
               f"(these are unresolved, not confirmed-absent).")
 
-    write_json_report(results, f"{args.output}.json")
-    write_markdown_report(results, f"{args.output}.md")
-    write_csv_report(results, f"{args.output}.csv")
+    try:
+        write_json_report(results, f"{args.output}.json")
+        write_markdown_report(results, f"{args.output}.md")
+        write_csv_report(results, f"{args.output}.csv")
+    except ReportWriteError as e:
+        print(f"[!] {e}", file=sys.stderr)
+        return 1
+
     print(f"[*] Reports written: {args.output}.json / .md / .csv")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

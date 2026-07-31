@@ -3,7 +3,7 @@ variant_engine.py
 Generates candidate username permutations from seed identity data.
 
 Design notes:
-- Pure function generator, no I/O, no network calls — easy to unit test.
+- Pure function generator, no I/O, no network calls -- easy to unit test.
 - Culturally-aware: supports name orderings beyond western first.last
   (e.g. patronymic-style, single mononym handles common in South Asian
   and Middle Eastern contexts) since western-name-pattern tools tend to
@@ -12,21 +12,27 @@ Design notes:
   duplicate strings.
 
 v2 change: candidates are now generated into priority tiers instead of
-one flat set. Previously, all candidates were pooled together and
-max_variants truncated a plain sorted() list — since sorted() orders
-alphabetically, that meant the cutoff was arbitrary with respect to
-which candidates were actually likely to hit. A known_handle-derived
-candidate (seeded from a *confirmed real handle*) could get sliced off
-in favor of a raw name+suffix permutation purely because it sorted
-later. Tiers fix this: known_handle mutations > contextual (name+
-location/profession) > name-only concatenations > mononym > extra/
-nickname tokens. Truncation now drops the lowest-priority tier(s)
-first, so a capped run keeps its best leads.
+one flat set. See prior version's notes -- known_handle mutations >
+contextual (name+location/profession) > name-only concatenations >
+mononym > extra/nickname tokens. Truncation drops the lowest-priority
+tier(s) first.
+
+v3 change:
+- _case_variants now also tries a full-uppercase form, not just
+  lower/Title -- a meaningful minority of platforms preserve a
+  case-sensitive vanity handle even when lookup itself is
+  case-insensitive.
+- generate_variants validates max_variants (rejects <= 0 rather than
+  silently returning a nonsensical negative-slice result) and validates
+  that at least one non-empty name token was supplied.
+- Single-token seeds no longer duplicate work between tier_name_concat
+  and tier_mononym: name-concat tier is skipped when there's nothing to
+  concatenate (only one name token and no separators would produce a
+  distinct string), since sep.join(["x"]) == "x" for every separator.
 """
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Iterable
 
 
 SEPARATORS = ["", ".", "_", "-"]
@@ -58,17 +64,16 @@ def _year_suffixes(birth_year: str | None) -> list[str]:
 
 def _case_variants(s: str) -> set[str]:
     """
-    Returns lowercase + capitalized forms of a candidate (e.g.
-    "ahmedchaudhary" -> {"ahmedchaudhary", "Ahmedchaudhary"}).
+    Returns lower / Titlecase / UPPERCASE forms of a candidate.
 
     Most sites treat usernames as case-insensitive, but a meaningful
     minority don't (or display a case-sensitive vanity handle even if
     lookup is insensitive), so it's worth the small extra candidate
-    count rather than silently skipping capitalized handles entirely.
+    count rather than silently skipping non-lowercase handles entirely.
     """
     if not s:
-        return {s}
-    variants = {s.lower()}
+        return set()
+    variants = {s.lower(), s.upper()}
     if s[0].isalpha():
         variants.add(s[0].upper() + s[1:].lower())
     return variants
@@ -84,15 +89,19 @@ def generate_variants(seed: SeedIdentity, max_variants: int | None = 500) -> lis
     first (tier order), each tier internally sorted for determinism.
 
     max_variants caps output size (permutation space grows fast); pass
-    None for unbounded (not recommended past 4-5 tokens). When capped,
-    lower-priority tiers are dropped/truncated first so the highest-
-    confidence candidates (those derived from a confirmed known_handle,
-    then name+context, then plain name permutations, then mononym,
-    then extra tokens) are never the ones lost to the cap.
+    None for unbounded (not recommended past 4-5 tokens), or a positive
+    int. When capped, lower-priority tiers are dropped/truncated first
+    so the highest-confidence candidates (those derived from a
+    confirmed known_handle, then name+context, then plain name
+    permutations, then mononym, then extra tokens) are never the ones
+    lost to the cap.
     """
+    if max_variants is not None and max_variants <= 0:
+        raise ValueError("max_variants must be a positive integer or None")
+
     names = [n.strip().lower() for n in seed.names if n.strip()]
     if not names:
-        raise ValueError("SeedIdentity.names must contain at least one name token")
+        raise ValueError("SeedIdentity.names must contain at least one non-empty name token")
 
     tokens = list(names)
 
@@ -128,7 +137,7 @@ def generate_variants(seed: SeedIdentity, max_variants: int | None = 500) -> lis
                 if suf:
                     _add_with_case(tier_known_handle, f"{stripped}{suf}")
 
-    # Tier 1: name + location, name + profession — more specific than a
+    # Tier 1: name + location, name + profession -- more specific than a
     # bare name permutation, so more likely to be a deliberate choice.
     for order in orderings:
         base = "".join(order)
@@ -143,13 +152,16 @@ def generate_variants(seed: SeedIdentity, max_variants: int | None = 500) -> lis
             _add_with_case(tier_contextual, f"{base}.{prof}")
 
     # Tier 2: name-only concatenations across orderings and separators.
-    for order in orderings:
-        for sep in SEPARATORS:
-            base = sep.join(order)
-            _add_with_case(tier_name_concat, base)
-            for suf in numeric_suffixes:
-                if suf:
-                    _add_with_case(tier_name_concat, f"{base}{suf}")
+    # Skipped for single-token seeds -- sep.join(["x"]) == "x" for every
+    # separator, so this would just duplicate tier_mononym's work.
+    if len(tokens) >= 2:
+        for order in orderings:
+            for sep in SEPARATORS:
+                base = sep.join(order)
+                _add_with_case(tier_name_concat, base)
+                for suf in numeric_suffixes:
+                    if suf:
+                        _add_with_case(tier_name_concat, f"{base}{suf}")
 
     # Tier 3: single-token mononym style (common in South Asian / MENA
     # handles: people often go by one name online rather than first.last).
