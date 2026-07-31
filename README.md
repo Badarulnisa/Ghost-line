@@ -1,125 +1,136 @@
-# username-variant-recon
+# Ghost-line
 
-Async username-permutation OSINT tool built on top of the
-[WhatsMyName](https://github.com/WebBreacher/WhatsMyName) dataset.
 
-Standard username checkers (including the original WMN checker script) only
-check the exact string you give them. In practice, real people rarely use
-one consistent handle across every platform — they drop numbers, swap name
-order, add their city, or go by a mononym on some sites. This tool generates
-realistic candidate variants from seed identity data and checks all of them
-concurrently against WMN's ~700-site dataset.
+Ghost-line generates realistic username variants from seed identity data (name, known handle, location, birth year) and checks them against ~700 sites using the WhatsMyName dataset  concurrently, in seconds rather than minutes.
 
-## Why this exists
 
-- WMN's own checker script is sequential — checking ~700 sites for one
-  username takes minutes. Checking a dozen variants that way doesn't scale.
-- No existing WMN wrapper does variant generation. You either check one
-  known handle, or you don't.
-- Most username-generation heuristics assume Western `first.last` naming
-  conventions. This tool also generates mononym-style and reordered
-  candidates common in South Asian / MENA naming conventions, which
-  Western-pattern-biased tools under-generate for.
+Unlike most username-checking tools, Ghost-line is built to handle naming conventions beyond the western `first.last` pattern mononyms, reordered names, and the handle styles common in South Asian and Middle Eastern contexts  which most existing tools under-generate for.
+-
 
-## How it works
+---
 
-1. **`variant_engine.py`** — takes seed identity data (name tokens, a known
-   real handle, birth year, location, profession, aliases) and generates a
-   deduplicated list of candidate usernames using separator variations,
-   name-order permutations, numeric suffixes, and mononym forms.
-2. **`wmn_wrapper.py`** — loads WMN's live `wmn-data.json` and checks each
-   candidate against every site **concurrently** via `httpx.AsyncClient` +
-   `asyncio.Semaphore`, instead of one request at a time.
-3. **`reporter.py`** — outputs results as JSON, Markdown, and CSV.
+![Ghost-line demo](assets/demo.svg)
 
-## Installation
+---
+
+## Quick start
 
 ```bash
-git clone https://github.com/Badarulnisa/username-variant-recon.git
-cd username-variant-recon
+git clone https://github.com/Badarulnisa/Ghost-line.git
+cd Ghost-line
 pip install -r requirements.txt
 ```
 
-## Usage
+Run a scan:
 
 ```bash
-# Generate variants from seed data and check all of them
-python3 cli.py --name ahmed chaudhary \
-    --known-handle chaudharyahmed07 \
-    --location lahore \
-    --year 1999 \
-    --max-variants 100 \
-    --output report
-
-# Check exact strings only, no variant generation
-python3 cli.py --name someexacthandle --single-only
+python3 cli.py --name <first> <last> --known-handle <existing_username> \
+    --location <city> --year <birth_year> --output report
 ```
 
-### Options
+When it finishes, you'll have three files: `report.json`, `report.md`, `report.csv`.
 
-| Flag | Description |
-|---|---|
-| `--name` | One or more name tokens (required) |
-| `--known-handle` | A confirmed real handle, used as a mutation seed |
-| `--location` | City/region to try as prefix/suffix |
-| `--profession` | Field/profession token to try as prefix/suffix |
-| `--year` | Birth year (also tries 2-digit form) |
-| `--extra` | Additional nickname/alias tokens |
-| `--max-variants` | Cap on generated variants (default 200) |
-| `--single-only` | Skip generation, check exact `--name`/`--known-handle` only |
-| `--concurrency` | Max concurrent requests per username (default 30) |
-| `--no-refresh` | Use cached dataset instead of fetching latest |
+**Only have a name?**
+```bash
+python3 cli.py --name jordan lee --output report
+```
 
-Output: `report.json`, `report.md`, `report.csv`.
+**Just want to check one exact username, no variant generation?**
+```bash
+python3 cli.py --name jordan_lee --single-only --output report
+```
 
-## ⚠️ Interpreting results — read this
+---
 
-**A hit means a username exists on that site. It does not mean it's the
-same person.** Common usernames get reused/squatted constantly. Before
-drawing any conclusion from a hit:
+## What the flags mean
 
-- Compare profile photo, bio text, and posting activity against your
-  target's known-confirmed profiles
-- Check for cross-links (does the profile link back to other confirmed
-  accounts?)
-- Treat single-site hits on generic sites with skepticism; treat hits
-  clustered across niche/related sites with more confidence
+| Flag | Required | What it does |
+|---|---|---|
+| `--name` | Yes | One or more name tokens, e.g. `--name jordan lee` |
+| `--known-handle` | No | A confirmed real handle — highest-value input, since Ghost-line mutates it directly (strips digits, tries new separators) rather than guessing from scratch |
+| `--location` | No | City/region, tried as both a prefix and suffix |
+| `--profession` | No | Field/role, tried as both a prefix and suffix |
+| `--year` | No | 4-digit birth year — also auto-tries the 2-digit form |
+| `--extra` | No | Extra nickname/alias tokens |
+| `--max-variants` | No | Caps how many candidates get generated (default 200) |
+| `--single-only` | No | Skips variant generation; checks only the exact `--name`/`--known-handle` strings given |
+| `--concurrency` | No | Max concurrent requests across the whole run (default 60) |
+| `--timeout` | No | Per-request read timeout in seconds (default 10) |
+| `--no-refresh` | No | Uses the cached WMN dataset instead of pulling the latest |
+| `--output` | No | Output file basename — writes `.json`, `.md`, and `.csv` (default `report`) |
 
-This tool surfaces candidates for manual verification. It does not, and
-cannot, confirm identity on its own.
+---
 
-## Ethics & legal use
+## Reading the report
 
-This tool only checks **public existence** of a username via each site's
-normal profile-lookup response — the same request your browser makes when
-you visit a profile URL. It does not authenticate, bypass access controls,
-or retrieve private data.
+Every hit is a **candidate**, not a confirmation. A matching username on a site does not prove the same person owns it. Before treating a hit as real, cross-check:
 
-Use this only against usernames/identities you have a legitimate reason to
-investigate (your own accounts, authorized engagements, or personal
-research where you are not violating platform ToS or harassment/stalking
-laws in your jurisdiction). Do not use this to enable harassment, doxxing,
-or stalking.
+- Avatar/profile photo
+- Bio text
+- Activity timing and pattern
+- Links to other confirmed profiles
 
-## Roadmap
+The markdown report also distinguishes **confirmed absent** from **unresolved** — if a site didn't respond during the run (timeout, rate limit, connection error), that's reported separately and should not be read as "username doesn't exist there." Re-run with a longer `--timeout` or lower `--concurrency` if a target shows a high unresolved count.
 
-- [x] v1: variant generation + async WMN checking + JSON/MD/CSV reports
-- [ ] Cross-platform correlation: perceptual-hash profile photo comparison
-      (`imagehash`) + fuzzy bio/display-name matching (`rapidfuzz`) to
-      auto-flag which hits are likely the same identity
-- [ ] Graph output (NetworkX / pyvis) — visual entity map of
-      username → sites → correlated identity clusters; Maltego-compatible
-      CSV export
-- [ ] Wayback Machine fallback — check CDX API for historical profile
-      existence on sites that now return "not found" (deleted/deactivated
-      accounts)
-- [ ] Site reliability scoring — weight hits using WMN's known
-      false-positive-prone site list
-- [ ] Stealth mode — randomized delay + UA rotation profile, alongside a
-      fast/max-concurrency profile
-- [ ] Culturally-aware variant generation beyond South Asian/MENA
-      mononym patterns — configurable naming-convention profiles
+---
+
+## Troubleshooting
+
+These are the actual issues people ran into getting set up — if something looks unfamiliar, it's probably one of these.
+
+**"fatal: destination path already exists and is not an empty directory"**
+You already have a folder with that name from a previous attempt. Remove it first, then clone again:
+```bash
+rm -rf Ghost-line          # macOS/Linux
+Remove-Item -Recurse -Force Ghost-line   # Windows PowerShell
+git clone https://github.com/Badarulnisa/Ghost-line.git
+```
+
+**Cloned folder looks empty**
+Two common causes:
+1. You're checking the wrong folder — after cloning, `cd` *into* the new folder before listing files (`ls` / `Get-ChildItem`). If you list from one level above, it'll look empty even though the repo is fine.
+2. The clone was interrupted (network drop, closed terminal mid-clone) and left a broken, git-less folder. Check with:
+   ```bash
+   git status
+   ```
+   If it says `fatal: not a git repository`, delete the folder and clone again — there's nothing to salvage.
+
+**`python3` not recognized (Windows)**
+Windows often just has `python`, not `python3`. Try:
+```powershell
+python cli.py --name jordan lee --output report
+```
+
+**`pip install` fails / ModuleNotFoundError when running**
+You're likely not inside the project folder, or dependencies didn't install. Confirm you're in the right directory and re-run:
+```bash
+pip install -r requirements.txt
+```
+
+**Nothing happens / hangs on "Loading WMN dataset..."**
+This step pulls the latest dataset from the network. If you're offline or the pull is slow, use the cached copy instead:
+```bash
+python3 cli.py --name jordan lee --no-refresh --output report
+```
+
+**Run finishes with "X site check(s) did not respond"**
+Not an error — some sites just didn't respond in time. It's reported separately from real hits precisely so it isn't mistaken for a clean negative result. See "Reading the report" above.
+
+---
+
+## Project structure
+
+```
+Ghost-line/
+├── cli.py                # entry point
+├── src/
+│   ├── variant_engine.py # candidate generation (pure, no I/O)
+│   ├── wmn_wrapper.py     # async site-checking engine
+│   └── reporter.py        # JSON/Markdown/CSV report writers
+├── tests/
+└── requirements.txt
+```
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT
