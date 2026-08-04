@@ -95,19 +95,34 @@ def plan_search(inv) -> list[str]:
         return []
 
     rec = assess_strategy(inv, max_variants=100)
-    targets = list(dict.fromkeys(rec.direct_targets + rec.variant_targets))
 
+    if rec.default_choice == "none":
+        print(rec.reasoning)
+        return []
+
+    print(rec.reasoning)
+
+    options = {"direct": rec.direct_targets, "variants": rec.variant_targets}
+    options["both"] = list(dict.fromkeys(rec.direct_targets + rec.variant_targets))
+    options["skip"] = []
+
+    available = [k for k in ("direct", "variants", "both") if options[k]]
+    available.append("skip")
+
+    if len(available) == 1:  # only one real option besides skip
+        choice = available[0]
+    else:
+        print(f"\nOptions: {' / '.join(available)}")
+        choice = ask(f"Choice [{rec.default_choice}]: ").strip().lower() or rec.default_choice
+        if choice not in available:
+            print(f"Unrecognized choice, defaulting to '{rec.default_choice}'.")
+            choice = rec.default_choice
+
+    targets = options[choice]
     if not targets:
         return []
 
-    parts = []
-    if rec.direct_targets:
-        parts.append(f"{len(rec.direct_targets)} known handle(s), checked exactly")
-    if rec.variant_targets:
-        parts.append(f"{len(rec.variant_targets)} generated guess(es) from name/context")
-    print(f"This cycle will check: {' + '.join(parts)} = {len(targets)} total, "
-          f"across ~700 sites.")
-
+    print(f"Checking {len(targets)} username(s) across ~700 sites.")
     if not yes("Proceed", default_no=False):
         return []
     return targets
