@@ -122,7 +122,10 @@ class SiteHit:
     site_name: str
     url: str
     category: str
-    confidence_note: str = ""  # populated later by correlator/reliability scoring
+    protection: list[str] = field(default_factory=list)  # e.g. ["cloudflare"] -- from WMN metadata
+    is_direct_match: bool = False   # was this an exact known handle, or a generated guess?
+    confidence_label: str = ""      # filled in by confidence.assess_hit_confidence after the check
+    confidence_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -237,6 +240,7 @@ async def _check_one_site(
             site_name=site_name,
             url=pretty_url,
             category=site.get("cat", "uncategorized"),
+            protection=list(site.get("protection", [])),
         ), None
 
     return None, None

@@ -43,10 +43,51 @@ def yes(prompt: str, default_no: bool = True) -> bool:
 # Step 1: seed collection (only asked once per fresh case)
 # ---------------------------------------------------------------------------
 
+def _show_current_seeds(inv) -> None:
+    print(f"Current seeds for '{inv.case_name}':")
+    print(f"  Names:     {', '.join(inv.names) or '(none)'}")
+    print(f"  Handles:   {', '.join(inv.handles) or '(none)'}")
+    print(f"  Emails:    {', '.join(inv.emails) or '(none)'}")
+    print(f"  Locations: {', '.join(inv.locations) or '(none)'}")
+    print(f"  Birth yr:  {inv.birth_year or '(none)'}")
+
+
+def _edit_seeds(inv) -> None:
+    print("\nEditing seeds -- press Enter to leave a field unchanged, or type a new")
+    print("value to REPLACE it entirely (this doesn't append, it overwrites).\n")
+
+    names_raw = ask(f"Names [{' '.join(inv.names) or 'none'}] (blank = keep): ")
+    if names_raw:
+        inv.names = names_raw.split()
+
+    handles_raw = ask(f"Handles, comma-separated [{', '.join(inv.handles) or 'none'}] "
+                       f"(blank = keep): ")
+    if handles_raw:
+        inv.handles = [h.strip().lstrip("@") for h in handles_raw.split(",") if h.strip()]
+
+    email = ask(f"Emails, comma-separated [{', '.join(inv.emails) or 'none'}] (blank = keep): ")
+    if email:
+        inv.emails = [e.strip() for e in email.split(",") if e.strip()]
+
+    location = ask(f"Locations, comma-separated [{', '.join(inv.locations) or 'none'}] "
+                    f"(blank = keep): ")
+    if location:
+        inv.locations = [l.strip() for l in location.split(",") if l.strip()]
+
+    year = ask(f"Birth year [{inv.birth_year or 'none'}] (blank = keep): ")
+    if year:
+        inv.birth_year = year
+
+    print()
+
+
 def collect_seeds(inv) -> None:
     if inv.cycle > 0 or inv.names or inv.handles or inv.emails:
         print(f"Resuming '{inv.case_name}' -- {inv.cycle} cycle(s) so far, "
               f"{len(inv.leads)} confirmed lead(s).\n")
+        _show_current_seeds(inv)
+        if yes("\nAdd or change anything before this cycle?"):
+            _edit_seeds(inv)
         return
 
     print(
@@ -90,15 +131,16 @@ def collect_seeds(inv) -> None:
 # Step 2: decide what to search this cycle
 # ---------------------------------------------------------------------------
 
-def plan_search(inv) -> list[str]:
+def plan_search(inv) -> tuple[list[str], list[str]]:
+    """Returns (targets_to_check, direct_targets_within_that_set)."""
     if not (inv.names or inv.handles):
-        return []
+        return [], []
 
     rec = assess_strategy(inv, max_variants=100)
 
     if rec.default_choice == "none":
         print(rec.reasoning)
-        return []
+        return [], []
 
     print(rec.reasoning)
 
@@ -120,12 +162,12 @@ def plan_search(inv) -> list[str]:
 
     targets = options[choice]
     if not targets:
-        return []
+        return [], []
 
     print(f"Checking {len(targets)} username(s) across ~700 sites.")
     if not yes("Proceed", default_no=False):
-        return []
-    return targets
+        return [], []
+    return targets, rec.direct_targets
 
 
 # ---------------------------------------------------------------------------
@@ -139,9 +181,15 @@ def review_hits(inv, results) -> None:
         print("\nNo hits this cycle.\n")
         return
 
-    print(f"\n{len(flat_hits)} hit(s) found:\n")
+    from confidence import sort_by_confidence, ConfidenceLabel
+    flat_hits = sort_by_confidence(flat_hits, lambda pair: ConfidenceLabel(pair[1].confidence_label))
+
+    print(f"\n{len(flat_hits)} hit(s) found, strongest first:\n")
     for i, (u, h) in enumerate(flat_hits):
         print(f"  [{i}] {u}  ->  {h.site_name}  ({h.url})")
+        print(f"      confidence: {h.confidence_label}")
+        for reason in h.confidence_reasons:
+            print(f"        - {reason}")
     print(f"\n{VERIFY_REMINDER}")
 
     picks = ask("Which index(es) did you verify are real? (comma-separated, blank for none): ")
@@ -206,10 +254,11 @@ async def main():
 
     while True:
         print(f"\n=== Cycle {inv.cycle + 1} ===")
-        targets = plan_search(inv)
+        targets, direct_targets = plan_search(inv)
 
         if targets:
-            results = await run_cycle(inv, dataset, targets, concurrency=60, timeout=10.0)
+            results = await run_cycle(inv, dataset, targets, concurrency=60, timeout=10.0,
+                                       direct_targets=direct_targets)
             save(inv, "investigation.json")
             review_hits(inv, results)
         else:

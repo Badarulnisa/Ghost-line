@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from variant_engine import SeedIdentity, generate_variants
 from wmn_wrapper import check_many_usernames_detailed
 from investigation import Investigation, Lead, CycleRecord
+from confidence import assess_hit_confidence
 
 
 @dataclass
@@ -82,17 +83,33 @@ def assess_strategy(inv: Investigation, max_variants: int = 100) -> StrategyReco
 
 
 async def run_cycle(inv: Investigation, dataset: dict, targets: list[str],
-                     concurrency: int, timeout: float):
+                     concurrency: int, timeout: float, direct_targets: list[str] | None = None):
     """
     Executes a check against an explicit target list (already decided by
     the user via a StrategyRecommendation) -- no guessing happens here,
     this function just runs whatever list it's given.
+
+    direct_targets, if given, marks which of `targets` were exact known
+    handles (vs. generated guesses) -- this feeds directly into each
+    hit's confidence assessment.
     """
     inv.cycle += 1
+    direct_set = set(direct_targets or [])
 
     results = await check_many_usernames_detailed(
         targets, dataset, concurrency=concurrency, timeout=timeout
     )
+
+    for username, r in results.items():
+        is_direct = username in direct_set
+        for hit in r.hits:
+            hit.is_direct_match = is_direct
+            assessment = assess_hit_confidence(
+                is_direct_match=is_direct,
+                site_protection=hit.protection,
+            )
+            hit.confidence_label = assessment.label.value
+            hit.confidence_reasons = assessment.reasons
 
     hit_count = sum(r.hit_count for r in results.values())
     inv.all_hits[str(inv.cycle)] = {
@@ -113,7 +130,8 @@ def accept_pivot(inv: Investigation, source: str, value: str, kind: str, note: s
     """Fold a chosen hit (or a manually-typed new lead) back into the seed pool."""
     lead = Lead(source=source, value=value, kind=kind, added_cycle=inv.cycle, note=note)
     inv.leads.append(lead)
-    inv.history[-1].pivots_selected.append(source)
+    if inv.history:
+        inv.history[-1].pivots_selected.append(source)
 
     if kind in ("username", "handle") and value not in inv.handles:
         inv.handles.append(value)
